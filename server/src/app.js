@@ -7,6 +7,7 @@ import hpp from "hpp";
 import { pinoHttp } from "pino-http";
 import { env } from "./config/env.js";
 import { logger } from "./config/logger.js";
+import { connectDb, isDbReady } from "./config/db.js";
 import { requestId } from "./middlewares/requestId.js";
 import { sanitizeRequest } from "./middlewares/sanitize.js";
 import { globalLimiter } from "./middlewares/rateLimiters.js";
@@ -16,6 +17,21 @@ import { productsRouter } from "./routes/productRoutes.js";
 import { healthRouter } from "./routes/healthRoutes.js";
 import { ApiError } from "./utils/ApiError.js";
 
+/**
+ * Serverless-safe lazy DB connection: on a long-running server connectDb()
+ * runs before listen() so this is a no-op; on Vercel/Lambda the first request
+ * of a cold instance establishes (and then reuses) the connection.
+ */
+let connecting = null;
+function ensureDbConnected(_req, _res, next) {
+  if (isDbReady()) return next();
+  connecting ||= connectDb().catch((err) => {
+    connecting = null;
+    throw err;
+  });
+  connecting.then(() => next(), next);
+}
+
 export function createApp() {
   const app = express();
 
@@ -23,6 +39,7 @@ export function createApp() {
   // Behind Nginx/ELB the client IP arrives via X-Forwarded-For.
   if (env.trustProxy) app.set("trust proxy", 1);
 
+  app.use(ensureDbConnected);
   app.use(requestId);
   app.use(
     pinoHttp({
@@ -85,3 +102,8 @@ export function createApp() {
 
   return app;
 }
+
+// Default export for serverless platforms (Vercel's Express preset imports
+// this module and expects the app itself). Harmless for the normal server,
+// which uses createApp() in src/index.js.
+export default createApp();
